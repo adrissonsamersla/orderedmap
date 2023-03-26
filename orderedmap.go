@@ -1,47 +1,84 @@
 package orderedmap
 
-type OrderedMap struct {
-	kv map[interface{}]*Element
-	ll list
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"sort"
+
+	"github.com/goccy/go-json"
+	"github.com/pkg/errors"
+)
+
+// MapSlice is a type structure that acts as a map and as a slice (keeping the order of the elements).
+type OrderedMap[K comparable, V any] struct {
+	kv map[K]*Element[K, V] // list head and tail
+	ll list[K, V]
 }
 
-func NewOrderedMap() *OrderedMap {
-	return &OrderedMap{
-		kv: make(map[interface{}]*Element),
+func New[K comparable, V any]() *OrderedMap[K, V] {
+	return &OrderedMap[K, V]{
+		kv: make(map[K]*Element[K, V]),
 	}
+}
+
+// MapItem as a string, for debugging.
+func (m *OrderedMap[K, V]) String() string {
+	display := "[ "
+
+	for i := 0; i < m.Len(); i++ {
+		display += m.ll.Get(i).String()
+
+		if i+1 < m.Len() {
+			display += "; "
+		}
+	}
+
+	display += " ]"
+
+	return display
 }
 
 // Get returns the value for a key. If the key does not exist, the second return
 // parameter will be false and the value will be nil.
-func (m *OrderedMap) Get(key interface{}) (interface{}, bool) {
-	element, ok := m.kv[key]
-	if ok {
-		return element.Value, true
-	}
+func (m *OrderedMap[K, V]) Get(key K) (V, bool) {
+	var (
+		val   V
+		exist bool
+	)
 
-	return nil, false
+	ele, exist := m.kv[key]
+	if exist {
+		return ele.Value, exist
+	} else {
+		return val, exist
+	}
 }
 
 // Set will set (or replace) a value for a key. If the key was new, then true
 // will be returned. The returned value will be false if the value was replaced
 // (even if the value was the same).
-func (m *OrderedMap) Set(key, value interface{}) bool {
-	_, alreadyExist := m.kv[key]
+func (m *OrderedMap[K, V]) Set(key K, value V) bool {
+	element, alreadyExist := m.kv[key]
 	if alreadyExist {
-		m.kv[key].Value = value
+		element.Value = value
 		return false
 	}
 
-	element := m.ll.PushBack(key, value)
+	element = new(Element[K, V])
+	element.Key = key
+	element.Value = value
+
+	m.ll.PushElement(element)
 	m.kv[key] = element
 	return true
 }
 
 // GetOrDefault returns the value for a key. If the key does not exist, returns
 // the default value instead.
-func (m *OrderedMap) GetOrDefault(key, defaultValue interface{}) interface{} {
-	if element, ok := m.kv[key]; ok {
-		return element.Value
+func (m *OrderedMap[K, V]) GetOrDefault(key K, defaultValue V) V {
+	if value, ok := m.kv[key]; ok {
+		return value.Value
 	}
 
 	return defaultValue
@@ -49,63 +86,71 @@ func (m *OrderedMap) GetOrDefault(key, defaultValue interface{}) interface{} {
 
 // GetElement returns the element for a key. If the key does not exist, the
 // pointer will be nil.
-func (m *OrderedMap) GetElement(key interface{}) *Element {
-	element, ok := m.kv[key]
-	if ok {
-		return element
+func (m *OrderedMap[K, V]) GetElement(key K) *Element[K, V] {
+	return m.kv[key]
+}
+
+func (m *OrderedMap[K, V]) Len() int {
+	return m.ll.Len()
+}
+
+//
+// (De)Serializing methods:
+//
+
+// MarshalJSON for map slice.
+func (m OrderedMap[K, V]) MarshalJSON() ([]byte, error) {
+	buf := &bytes.Buffer{}
+	buf.Write([]byte{'{'})
+
+	for ele := m.ll.Front(); ele != nil; ele = ele.next {
+		b, err := json.Marshal(&ele.Value)
+		if err != nil {
+			return nil, err
+		}
+
+		buf.WriteString(fmt.Sprintf("%q:", fmt.Sprint(ele.Key)))
+		buf.Write(b)
+
+		if ele.next != nil {
+			buf.Write([]byte{','})
+		}
 	}
 
+	buf.Write([]byte{'}'})
+	return buf.Bytes(), nil
+}
+
+// UnmarshalJSON for map slice.
+func (m *OrderedMap[K, V]) UnmarshalJSON(b []byte) error {
+	// temporary structure for unmarshaling
+	aux := map[K]*Element[K, V]{}
+
+	var counter int64 = 0
+	ctx := context.WithValue(context.Background(), mapItemCounterType{}, &counter)
+
+	// using default unmarshaling for maps
+	if err := json.UnmarshalContext(ctx, b, &aux); err != nil {
+		return errors.Wrap(err, "error while unmarshaling")
+	}
+
+	// passing the values for MapSlice
+	for key, ele := range aux {
+		// saving this value because it will overriden on m.ll.PushElement
+		var index int64 = ele.index
+
+		// saving the element (*Element[K,V]) to both ll and kv
+		m.ll.PushElement(ele)
+		m.kv[key] = ele
+
+		// filling the other fields
+		ele.index = index
+		ele.Key = key
+	}
+
+	// fixing the order os the elements
+	sort.Sort(&m.ll)
+
+	// so far, so good
 	return nil
-}
-
-// Len returns the number of elements in the map.
-func (m *OrderedMap) Len() int {
-	return len(m.kv)
-}
-
-// Keys returns all of the keys in the order they were inserted. If a key was
-// replaced it will retain the same position. To ensure most recently set keys
-// are always at the end you must always Delete before Set.
-func (m *OrderedMap) Keys() (keys []interface{}) {
-	keys = make([]interface{}, 0, m.Len())
-	for el := m.Front(); el != nil; el = el.Next() {
-		keys = append(keys, el.Key)
-	}
-	return keys
-}
-
-// Delete will remove a key from the map. It will return true if the key was
-// removed (the key did exist).
-func (m *OrderedMap) Delete(key interface{}) (didDelete bool) {
-	element, ok := m.kv[key]
-	if ok {
-		m.ll.Remove(element)
-		delete(m.kv, key)
-	}
-
-	return ok
-}
-
-// Front will return the element that is the first (oldest Set element). If
-// there are no elements this will return nil.
-func (m *OrderedMap) Front() *Element {
-	return m.ll.Front()
-}
-
-// Back will return the element that is the last (most recent Set element). If
-// there are no elements this will return nil.
-func (m *OrderedMap) Back() *Element {
-	return m.ll.Back()
-}
-
-// Copy returns a new OrderedMap with the same elements.
-// Using Copy while there are concurrent writes may mangle the result.
-func (m *OrderedMap) Copy() *OrderedMap {
-	m2 := NewOrderedMap()
-
-	for el := m.Front(); el != nil; el = el.Next() {
-		m2.Set(el.Key, el.Value)
-	}
-
-	return m2
 }

@@ -123,6 +123,10 @@ func (m OrderedMap[K, V]) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON for map slice.
 func (m *OrderedMap[K, V]) UnmarshalJSON(b []byte) error {
+	if m.kv == nil {
+		m.kv = make(map[K]*Element[K, V])
+	}
+
 	// temporary structure for unmarshaling
 	aux := map[K]*Element[K, V]{}
 
